@@ -1,0 +1,232 @@
+{-# LANGUAGE TypeFamilies #-}
+module Wasm.ComponentParser where
+
+import Control.Applicative (Alternative (..))
+import Data.Word
+import Lib.Parser
+import qualified Wasm.Core as Core
+import Wasm.CommonParsing
+import Wasm.Component
+
+component :: Readable Component
+component = do items magic
+               items version
+               items layer
+               many (section componentSection) <* eof
+
+componentSection :: Word8 -> Readable Section
+--import Control.Applicative (Alternative (..))
+--import Data.Bits
+--import Data.Word
+--import Data.Text.Encoding (decodeUtf8)
+--import qualified Data.ByteString as B
+--import qualified Data.Text as T
+--import Lib.Parser
+--
+--import Debug.Trace
+--
+--data Section
+--  = Custom (String, [Word8])
+--  | WitTypes [WitType]
+--  | WitExport [(String, Integer, Maybe ExternDesc)]
+--  | Unknown Word8 [Word8]
+--  deriving (Show)
+--
+--component :: Parser SyntaxError [Section]
+--component = preamble *> many section <* eof
+--
+--preamble :: Parser SyntaxError [Word8]
+--preamble = items (magic <> version <> layer)
+--
+--
+--disp :: Show i => String -> i -> i
+--disp s = (\i -> trace (s <> " " <> show i) i)
+--
+--iSection :: Word8 -> Parser SyntaxError Section
+--iSection 0 = Custom <$> ((,) <$> label <*> many byte)
+--iSection 7 = WitTypes <$> vec witType
+--iSection 11 = (WitExport <$> vec ((,,) <$> exportName <*> u32 <*> optional externDesc)) <* item 0x00
+--iSection n = Unknown n <$> many byte
+--
+---- Section 7
+--witType :: Parser SyntaxError WitType
+--witType = defType
+--type WitType = DefType
+--
+--defType :: Parser SyntaxError DefType
+--defType = (DVT <$> defValType)
+--      <|> (FT <$> funcType)
+--      <|> (CT <$> componentType)
+--      <|> (INST <$> instanceType)
+--
+--data DefType
+--  = DVT DefValType
+--  | FT FuncType
+--  | CT [ComponentDecl]
+--  | INST [InstanceDecl]
+--  deriving (Show)
+--
+--primValType :: Parser SyntaxError PrimValType
+--primValType = item 0x7f *> pure BOOL
+--          <|> item 0x7e *> pure S8
+--          <|> item 0x7d *> pure U8
+--          <|> item 0x7c *> pure S16
+--          <|> item 0x7b *> pure U16
+--          <|> item 0x7a *> pure S32
+--          <|> item 0x79 *> pure U32
+--          <|> item 0x78 *> pure S64
+--          <|> item 0x77 *> pure U64
+--          <|> item 0x76 *> pure F32
+--          <|> item 0x75 *> pure F64
+--          <|> item 0x74 *> pure CHAR
+--          <|> item 0x73 *> pure STRING
+--
+--data PrimValType
+--  = BOOL | S8 | U8 | S16 | U16 | S32 | U32 | S64 | U64 | F32 | F64
+--  | CHAR | STRING
+--  deriving (Show)
+--
+--defValType :: Parser SyntaxError DefValType
+--defValType = DPVT <$> primValType
+--         <|> RECORD <$> (item 0x72 *> vec labelValType)
+--         <|> VARIANT <$> (item 0x71 *> vec cas)
+--         <|> LIST <$> (item 0x70 *> valType)
+--         <|> TUPLE <$> (item 0x6f *> vec valType)
+--         <|> FLAGS <$> (item 0x6e *> vec label)
+--         <|> ENUM <$> (item 0x6d *> vec label)
+--         <|> OPTION <$> (item 0x6b *> valType)
+--         <|> RESULT <$> (item 0x6a *> optional valType) <*> optional valType
+--         <|> OWN <$> (item 0x69 *> u32)
+--         <|> BORROW <$> (item 0x68 *> u32)
+--data DefValType
+--  = DPVT PrimValType
+--  | RECORD [(String, ValType)]
+--  | VARIANT [(String, Maybe ValType)]
+--  | LIST ValType
+--  | TUPLE [ValType]
+--  | FLAGS [String]
+--  | ENUM [String]
+--  | OPTION ValType
+--  | RESULT (Maybe ValType) (Maybe ValType)
+--  | OWN Integer
+--  | BORROW Integer
+--  deriving (Show)
+--
+--labelValType :: Parser SyntaxError (String, ValType)
+--labelValType = (,) <$> label <*> valType
+--
+--cas :: Parser SyntaxError (String, Maybe ValType)
+--cas = (,) <$> label <*> optional valType <* item 0x00
+--
+--label :: Parser SyntaxError String
+--label = do n <- fromIntegral <$> u32
+--           s <- takeN n
+--           pure $ T.unpack $ decodeUtf8 $ B.pack s
+--
+--optional :: Parser SyntaxError a -> Parser SyntaxError (Maybe a)
+--optional p = item 0x00 *> pure Nothing
+--         <|> item 0x01 *> (Just <$> p)
+--
+--valType :: Parser SyntaxError ValType
+--valType = PVT <$> primValType
+--      <|> I <$> u32
+--          
+--data ValType
+--  = I Integer
+--  | PVT PrimValType
+--  deriving (Show)
+--
+--resourceType :: Parser SyntaxError (Maybe Integer)
+--resourceType = items [0x3f, 0x7f] *> optional u32
+--
+--funcType :: Parser SyntaxError FuncType
+--funcType = (,) <$> (item 0x40 *> paramList) <*> resultList
+--
+--type FuncType = ([(String, ValType)], Either ValType [(String, ValType)])
+--
+--paramList :: Parser SyntaxError [(String, ValType)]
+--paramList = vec labelValType
+--
+--resultList :: Parser SyntaxError (Either ValType [(String, ValType)])
+--resultList = Left <$> (item 0x00 *> valType)
+--         <|> Right <$> (item 0x01 *> vec labelValType)
+--
+--componentType :: Parser SyntaxError [ComponentDecl]
+--componentType = item 0x41 *> vec componentDecl
+--
+--instanceType :: Parser SyntaxError [InstanceDecl]
+--instanceType = item 0x42 *> vec instanceDecl
+--
+--componentDecl :: Parser SyntaxError ComponentDecl
+--componentDecl = IMPORTD <$> (item 0x03 *> importDecl)
+--            <|> INSTANCED <$> instanceDecl
+--data ComponentDecl
+--  = IMPORTD (String, ExternDesc)
+--  | INSTANCED InstanceDecl
+--  deriving (Show)
+--
+--instanceDecl :: Parser SyntaxError InstanceDecl
+--instanceDecl = --item 0x00 *> empty -- TODO. wasmType
+--               IT <$> (item 0x01 *> witType)
+--           <|> ALIAS <$> (item 0x02 *> alias)
+--           <|> ED <$> (item 0x04 *> exportDecl)
+--
+--data InstanceDecl
+--  = IT WitType
+--  | ALIAS Alias
+--  | ED (String, ExternDesc)
+--  deriving (Show)
+--
+--importDecl :: Parser SyntaxError (String, ExternDesc)
+--importDecl = (,) <$> importName <*> externDesc
+--
+--exportDecl :: Parser SyntaxError (String, ExternDesc)
+--exportDecl = (,) <$> exportName <*> externDesc
+--
+--importName :: Parser SyntaxError String
+--importName = item 0x00 *> label
+--
+--exportName :: Parser SyntaxError String
+--exportName = item 0x00 *> label
+--         <|> item 0x01 *> label
+--
+--externDesc :: Parser SyntaxError ExternDesc
+--externDesc = ED_CoreModuleType <$> (items [0x00, 0x11] *> u32)
+--         <|> ED_FuncType <$> (item 0x01 *> u32)
+--         <|> ED_Value <$> (item 0x02 *> valType)
+--         <|> ED_Type <$> (item 0x03 *> typeBound)
+--         <|> ED_Component <$> (item 0x04 *> u32)
+--         <|> ED_Instance <$> (item 0x05 *> u32)
+--
+--data ExternDesc = ED_CoreModuleType Integer  -- (core module (type i))
+--                | ED_FuncType Integer        -- (func (type i))
+--                | ED_Value ValType           -- (value t)
+--                | ED_Type TypeBound          -- (type b)
+--                | ED_Component Integer       -- (component (type i))
+--                | ED_Instance Integer        -- (instance (type i))
+--                deriving (Show)
+--
+--typeBound :: Parser SyntaxError TypeBound
+--typeBound = (TB_Eq <$> (item 0x00 *> u32))
+--        <|> (item 0x01 *> pure TB_SubResource)
+--data TypeBound = TB_Eq Integer     -- (eq i)
+--               | TB_SubResource    -- (sub resource)
+--               deriving (Show)
+--
+---- Alias Definitions
+--type Alias = () --(Sort, AliasTarget)
+--alias = empty
+----alias :: Parser SyntaxError Alias
+----alias = (,) <$> sort <*> aliasTarget
+--
+----aliasTarget = item 0x00 *> pure () -- TODO
+---- aliasTarget :: Parser SyntaxError AliasTarget
+---- aliasTarget = AExport <$> item 0x00
+----           <|> ACoreExport
+----           <|> AOuter <$> u32 <*> u32
+--
+--data AliasTarget
+--  = AExport Integer String
+--  | ACoreExport Integer String
+--  | AOuter Integer Integer
+--

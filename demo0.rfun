@@ -1,0 +1,9 @@
+module demo0 where
+
+I x = x;
+
+K x y = x;
+
+S x y z = x z (y z);
+
+R x y z = x (z (y z))
