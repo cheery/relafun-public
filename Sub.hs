@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings, TypeFamilies #-}
 module Sub where
 
+import Debug.Trace
+
 import Data.Maybe (mapMaybe)
 import Lib.ContEff hiding (Context)
 import Data.String (IsString(..))
@@ -16,6 +18,11 @@ import Data.Maybe (fromJust)
 
 -- For control flow
 import qualified Data.Array as A
+
+-- Debugging aid
+(!?) :: (Ord a, Show a) => M.Map a b -> a -> b
+(!?) m a | Just b <- M.lookup a m = b
+         | otherwise = error $ "key " <> show a <> " not present"
 
 data Inp = Symbol String
          | Direct (CompType Inp)
@@ -58,9 +65,9 @@ annotateRec decls = map f (scctypes decls)
                             | otherwise = keep a
 
 scctypes :: [TypeDecl] -> [[String]]
-scctypes decls = map (map (dm M.!) . sort . preorder) (scc' graph)
+scctypes decls = map (map (dm !?) . sort . preorder) (scc' graph)
   where graph = buildG (0, maximum (map fst defs)) edges
-        edges = [(md M.! name, md M.! to)
+        edges = [(md !? name, md !? to)
                 | (name, Sub _ r ct) <- decls,
                   to <- foldr sfold (foldr sfold [] r) ct, S.member to avail ]
         sfold :: Inp -> [String] -> [String]
@@ -100,7 +107,7 @@ canonicalize group = do i <- install (map fst group) (map snd group)
 getcanon :: (State CanonState :< eff)
          => Inp -> Eff eff (Int, Int)
 getcanon (Symbol s) = do st <- get @CanonState
-                         pure (mapNameToTX st M.! s)
+                         pure (mapNameToTX st !? s)
 getcanon (Direct ct) = do i <- install [] [fromCompType ct]
                           pure (i,0)
 
@@ -136,8 +143,8 @@ inpToCan names group = do st <- get @CanonState
 toTypeSection :: CanonState -> [RecType Int]
 toTypeSection st = map f (M.toAscList (mapToCanon st))
   where f (ind, group) = map (fmap (g ind)) group
-        g ind (Idx i) = k M.! i
-        g ind (RecIdx i) = k M.! (ind, i)
+        g ind (Idx i) = k !? i
+        g ind (RecIdx i) = k !? (ind, i)
         k = toIndices st
 
 toIndices :: CanonState -> M.Map TX Int
@@ -214,6 +221,7 @@ type AST t = Tree (Instruction t)
 data Cfg t = Cfg { entryLabel :: Label,
                    nodeBody :: [AST t],
                    flowLeaving :: ControlFlow t }
+             deriving (Show)
 type Label = Int
 
 data ControlFlow t
@@ -221,6 +229,7 @@ data ControlFlow t
   | Conditional (AST t) Label Label
   | CastFlow (AST t) (RefType t) [(RefType t, Label)] (Maybe Label)
   | TerminalFlow
+  deriving (Show)
 
 cfgEdges :: Label -> ControlFlow t -> [(Label, Label)]
 cfgEdges a (Unconditional label) = [(a,label)]
@@ -258,7 +267,7 @@ data ContainingSyntax
 
 structuredControl :: forall t. [Cfg t] -> Wasm t
 structuredControl graph = doTree domTree []
-  where domTree = fmap (blockmap M.!) (sortedDomTree g 0)
+  where domTree = fmap (blockmap !?) (sortedDomTree g 0)
         g = buildG (0, length graph)
                    [edge | cfg <- graph,
                            edge <- cfgEdges (entryLabel cfg) (flowLeaving cfg)]
@@ -286,6 +295,7 @@ structuredControl graph = doTree domTree []
                  WasmIf (postorder e)
                         (doBranch xlabel t (IfThenElse : context))
                         (doBranch xlabel f (IfThenElse : context))
+                 <> WasmActions [I_Unreachable]
                CastFlow e (Ref frb typ) brc m ->
                  let doCastFlow [] cx
                         = WasmSeq (WasmActions (postorder e))
@@ -315,7 +325,7 @@ structuredControl graph = doTree domTree []
 
         rp = rpnum g 0
         isBackward :: Label -> Label -> Bool
-        isBackward from to = rp M.! to <= rp M.! from
+        isBackward from to = rp !? to <= rp !? from
         
         isMergeLabel :: Label -> Bool
         isMergeLabel l = S.member l mergeBlockLabels
@@ -328,12 +338,12 @@ structuredControl graph = doTree domTree []
         forwardPreds to = [from | from <- q A.! to, not (isBackward from to)]
         
         rpblocks :: [Cfg t]
-        rpblocks = map (blockmap M.!) (reverse (postorderF (dfs g [0])))
+        rpblocks = map (blockmap !?) (reverse (postorderF (dfs g [0])))
 
         rootLabel :: Tree (Cfg t) -> Cfg t
         rootLabel (Node root _) = root
         
-        subtreeAt label = subtrees M.! label
+        subtreeAt label = subtrees !? label
         subtrees :: M.Map Label (Tree (Cfg t))
         subtrees = addSubtree M.empty domTree
           where addSubtree map t@(Node root children) =
@@ -342,7 +352,7 @@ structuredControl graph = doTree domTree []
         isLoopHeader = isHeaderLabel . entryLabel
         isHeaderLabel = (`S.member` headers)
           where headers :: S.Set Label
-                headers = foldMap headersPointedTo blockmap
+                headers = foldMap headersPointedTo (postorder domTree)
                 headersPointedTo block =
                   S.fromList [label | label <- g A.! entryLabel block,
                                                dominates label (entryLabel block)]
@@ -400,4 +410,4 @@ compileDecls td d = section TypeSection types
           mapM_ canonicalize (annotateRec td)
           d' <- mapM (mapM getcanon) d
           indices <- toIndices <$> get @CanonState
-          pure $ map (fmap (indices M.!)) d'
+          pure $ map (fmap (indices !?)) d'
