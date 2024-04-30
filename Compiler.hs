@@ -1,6 +1,7 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds, ImplicitParams, OverloadedStrings #-}
 module Compiler where
 
+import Data.Maybe (mapMaybe)
 import Lib.ContEff
 import Control.Monad (foldM)
 import Data.Maybe (fromJust)
@@ -13,6 +14,7 @@ import qualified Data.Map as M
 import qualified Backend as B
 import qualified BackendWasm as BW
 import qualified ToBackend as TB
+import qualified Text.PrettyPrint as P
 import System.Exit
 import System.Environment
 
@@ -25,7 +27,7 @@ entry inf outf = do
   case quickParse file text of
     Left err -> print err
     Right (name, decls) -> do
-      let blocks = sccBlocks (select (defOnly syms) decls)
+      let blocks = sccBlocks (mapMaybe (defOnly syms) decls)
       let ((tp,prog), err) = snd $ runEff'
                     $ runUnify @Type initUnify
                     $ writeToList @(Name, InferenceError)
@@ -34,29 +36,41 @@ entry inf outf = do
       then do print err
               exitWith (ExitFailure 0)
       else do let g = map (\(x,y) -> (x, TB.toObj [] y)) prog
+              mapM_ printTypeScheme (M.toList tp)
               mapM_ print prog
               mapM_ print g
               BW.compileFile outf g
+
+printTypeScheme (name, TypeScheme _ env tp cs)
+ = let ?env = env in
+   let prefix = if length env == 0
+                then P.empty
+                else "∀" P.<> P.sep (map (P.text . snd) env) P.<> "."
+       prefix2 = if S.size cs == 0
+                then P.empty
+                else commaSep [P.text name P.<+> outputType 0 t
+                              | CSi name t <- S.toList cs]
+   in print (P.text name P.<+> ":" P.<+> prefix P.<+> prefix2 P.<+> outputType 0 tp)
 
 proceed blocks decls = do
   foldM (declBlock decls) (M.empty :: M.Map String TypeScheme,
                            []) blocks
 
 declBlock :: (Unify Type :< eff, Write (Name, InferenceError) :< eff)
-          => [DeclarationSyntax]
+          => [DeclarationSyntax MVar]
           -> (M.Map String TypeScheme, [(String, Term)])
           -> [Name]
           -> Eff eff (M.Map String TypeScheme, [(String, Term)])
 declBlock decls (types, prog) block = do
   let terms = filter (\(name,_) -> name `elem` block)
-            $ select (defOnly id) decls
+            $ mapMaybe (defOnly id) decls
   let perTerm (name, term)
         = do (typing, errs) <- writeToList @InferenceError
                    $ infer types [] term >>= reify
              mapM (\err -> write (name, err)) errs
              let Typing _ t c = typing
-             let vs = free t <> S.unions (map free (S.toList c))
-             pure (name, TypeScheme vs t c, term)
+             let vs = free t <> M.unions (map free (S.toList c))
+             pure (name, TypeScheme vs (nameThemAbc $ M.keys vs) t c, term)
   schemes <- mapM perTerm terms
 
   pure (types <> M.fromList (map (\(x,y,_) -> (x,y)) schemes),
@@ -73,11 +87,6 @@ sccBlocks defs = map (map (defMapF M.!) . preorder) (scc' graph)
         defNames = S.fromList (map fst defs)
         invert m = fmap (\(a,b) -> (b,a)) m
 
-select :: (a -> Maybe b) -> [a] -> [b]
-select f [] = []
-select f (x:xs) | Just y <- f x = y : select f xs
-                | otherwise     = select f xs
-
-defOnly :: (Term -> a) -> DeclarationSyntax -> Maybe (Name, a)
+defOnly :: (Term -> a) -> DeclarationSyntax t -> Maybe (Name, a)
 defOnly f (Definition name expr) = Just (name, f expr)
 defOnly _ _                      = Nothing

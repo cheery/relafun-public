@@ -7,7 +7,8 @@
   MagicHash,
   UnboxedTuples,
   PolyKinds,
-  DataKinds #-}
+  DataKinds,
+  FunctionalDependencies #-}
 module Lib.ContEff where
 
 import qualified Control.Exception as E
@@ -25,6 +26,7 @@ import GHC.IO (IO(..))
 import GHC.Stack (HasCallStack)
 import Prelude hiding (log)
 import qualified Data.Map as M
+import qualified Data.Set as S
 
 newtype Ctl a = Ctl (IO a)
   deriving newtype (Functor, Applicative, Monad)
@@ -109,6 +111,11 @@ get = perform Get
 put :: forall a eff. (State a :< eff) => a -> Eff eff ()
 put x = perform (Put x)
 
+modify :: forall a eff. (State a :< eff)
+       => (a -> a) -> Eff eff ()
+modify f = do st <- get
+              put (f st)
+
 state :: forall s a eff. s -> Eff (State s ': eff) a -> Eff eff (s, a)
 state init (Eff action) = do tag <- Eff (const newPromptTag)
                              ctx <- Eff pure
@@ -164,47 +171,55 @@ try action = handler action fop (pure . Just)
   where fop :: HandlerFunc Abort eff (Maybe a)
         fop Abort _ = pure Nothing
 
+data Except t a where
+  Except :: t -> Except t a
+
+except :: forall t a eff. (Except t :< eff) => t -> Eff eff a
+except e = perform (Except e)
+
+catch :: forall t a eff. Eff (Except t ': eff) a -> Eff eff (Either t a)
+catch action = handler action fop (pure . Right)
+  where fop :: HandlerFunc (Except t) eff (Either t a)
+        fop (Except e) _ = pure (Left e)
+{--
 type MVar = Int
 type Unify s = State (UState s)
-type UState s = (Subst s, MVar)
-type Subst s = M.Map MVar s
+type UState s = (M.Map MVar s, MVar)
 
 initUnify :: UState s
 initUnify = (M.empty, 0)
 
-runUnify :: forall s a eff. UState s -> Eff (Unify s ': eff) a -> Eff eff (UState s, a)
-runUnify = state @(UState s)
-
-tryUnify :: forall s a eff. (Unify s :< eff) => Eff (Unify s ': Abort ': eff) a -> Eff eff (Maybe a)
-tryUnify action = do st <- get @(UState s)
-                     result <- try (runUnify st action)
-                     case result of
-                       Just (st', x) -> put st' >> pure (Just x)
-                       Nothing       -> pure Nothing
-
-class Unifiable s where
-  fromMVar :: MVar -> s
+class PreUnifiable s where
   walk :: (Unify s :< eff) => s -> Eff eff s
-  unify :: (Unify s :< eff, Abort :< eff) => s -> s -> Eff eff ()
   occurs :: MVar -> s -> Bool
+
+class PreUnifiable s => Unifiable s where
+  unify :: (Unify s :< eff, Abort :< eff) => s -> s -> Eff eff ()
 
 (===) :: (Unifiable s, Unify s :< eff, Abort :< eff) => s -> s -> Eff eff ()
 (===) = unify
+
+class PreUnifiable s => ScopedUnifiable s where
+  scopedUnify :: (Unify s :< eff, Abort :< eff) => [s] -> s -> s -> Eff eff ()
 
 raw :: forall t eff. (Unify t :< eff) => (MVar -> t) -> Eff eff t
 raw f = do (s, c) <- get @(UState t)
            put (s, c+1)
            pure (f c)
 
-fresh :: forall t eff. (Unifiable t, Unify t :< eff) => Eff eff t
-fresh = raw fromMVar
-
 getmvar :: MVar -> UState s -> Maybe s
 getmvar m (s,c) = M.lookup m s
 
-ext :: forall t eff. (Unifiable t, Unify t :< eff, Abort :< eff) => MVar -> t -> Eff eff ()
+ext :: forall t eff. (PreUnifiable t, Unify t :< eff, Abort :< eff) => MVar -> t -> Eff eff ()
 ext i v = do v' <- walk v
              if occurs i v'
              then do pure ()
              else do (s,c) <- get @(UState t)
                      put (M.insert i v s, c)
+
+class Reify t v | t -> v where
+  reify :: (Unify v :< eff) => t -> Eff eff t
+
+class Free t v | t -> v where
+  free :: t -> S.Set v
+--}
