@@ -61,6 +61,7 @@ instance Unifiable (Bind (Name Ty, Embed MKind) Ty) where
 -- We only need to act if we're dealing with row fields.
 isRowMeta :: Ty -> Bool
 isRowMeta (TRField _ _ _) = True
+isRowMeta _ = False
 
 rmeta :: (Unify :< eff) => Ty -> Eff eff (Maybe (MVar MKind Ty), M.Map String Ty)
 rmeta TREnd = pure (Nothing, M.empty)
@@ -164,7 +165,7 @@ data PTm
   | PLam (Bind (Name PTm, Embed Ty) PTm)
   | PLet (Bind (Name PTm, Embed Ty, Embed PTm) PTm)
   | PApp PTm PTm
-  | PTLam (Bind (Name Ty) PTm)
+  | PTLam (Bind (Name Ty, Embed MKind) PTm)
   | PTApp PTm Ty
   | PQuery Ty
   | PILam (Bind (Name PTm, Embed Ty) PTm)
@@ -174,29 +175,57 @@ data PTm
 
 instance Unifiable (Embed Ty)
 instance Unifiable (Embed PTm)
+instance Unifiable (Embed MKind)
 instance Unifiable (Name PTm, Embed Ty, Embed PTm)
 instance Unifiable (Bind (Name PTm, Embed Ty, Embed PTm) PTm)
 instance Unifiable (Name PTm, Embed Ty)
 instance Unifiable (Bind (Name PTm, Embed Ty) PTm)
-instance Unifiable (Bind (Name Ty) PTm)
+instance Unifiable (Name Ty, Embed MKind)
+instance Unifiable (Bind (Name Ty, Embed MKind) PTm)
 instance Unifiable PTm
 instance Alpha PTm
 
--- The last stage before we reach the backend.
-data FTm
-  = FVar (Name FTm)
-  | FLit Integer
-  | FLet FTm (Bind (Name FTm) FTm)
-  | FLam (Bind (Name FTm, Embed Ty) FTm)
-  | FApp FTm FTm
-  | FTLam (Bind (Name Ty) FTm)
-  | FTApp FTm Ty
+-- Nearly the last stage before we reach the backend.
+data YTm
+  = YVar (Name YTm)
+  | YLit Integer
+  | YLet (Bind (Name YTm, Embed Ty, Embed YTm) YTm)
+  | YLams (Bind ([(Name Ty, Embed MKind)], [(Name YTm, Embed Ty)]) YTm)
+  | YApps YTm [Ty] [YTm]
   deriving (Show, Generic, Typeable)
 
-instance Alpha FTm
+instance Alpha YTm
+instance Subst YTm Ty
+instance Subst YTm Kind
+instance Subst YTm MKind
+instance Subst YTm YTm where
+  isvar (YVar n) = Just (SubstName n)
+  isvar _ = Nothing
+instance Subst Ty YTm
 
--- TODO: Reimplement ToBackend.hs
--- TODO: Reimplement Implicits.hs
+ynorm :: YTm -> YTm
+ynorm (YVar name) = YVar name
+ynorm (YLit i) = YLit i
+ynorm (YLet bnd) = YLet (bind (name, ty, Embed (ynorm tm1)) (ynorm tm2))
+  where ((name, ty, Embed tm1), tm2) = unsafeUnbind bnd
+ynorm (YLams bnd) = case extractLam body of
+                         Just ((xs', ys'), body) -> ynorm (YLams (bind (xs <> xs', ys <> ys') body))
+                         Nothing -> YLams (bind (xs, ys) (ynorm body))
+  where ((xs, ys), body) = unsafeUnbind bnd
+        extractLam (YLams bnd) = Just (head, body)
+           where (head, body) = unsafeUnbind bnd
+        extractLam (YLet bnd) | (block, body) <- unsafeUnbind bnd
+                              , Just (head, body) <- extractLam body = Just (head, YLet (bind block body))
+        extractLam _ = Nothing
+ynorm (YApps f xs ys) = case extractApp f id of
+                             Just (f, xs', ys', wrap) -> ynorm (wrap (YApps f (xs' <> xs) (ys' <> ys)))
+                             Nothing -> YApps (ynorm f) xs (map ynorm ys)
+  where extractApp (YApps f xs ys) wrap = Just (f, xs, ys, wrap)
+        extractApp (YLet bnd) wrap | (block, body) <- unsafeUnbind bnd
+                                   , Just (f, xs, ys, wrap) <- extractApp body wrap = Just (f, xs, ys, YLet . bind block . wrap)
+        extractApp _ _ = Nothing
+        
+
 -- TODO: Implement termination checking for rules
 -- TODO: Reimplement Compiler.hs
 
@@ -207,8 +236,6 @@ instance Alpha FTm
 instance Subst FTm FTy
 instance Subst FTy FTm
 instance Subst FTm FTm where
-  isvar (FVar n) = Just (SubstName n)
-  isvar _ = Nothing
 instance Subst FTy FTy where
   isvar (FTVar n) = Just (SubstName n)
   isvar _ = Nothing

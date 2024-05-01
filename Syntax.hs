@@ -20,11 +20,11 @@ data SyntaxError
   | NoParse
   deriving (Eq, Show)
 
-type FileSyntax a = (String, [DeclarationSyntax a])
+type FileSyntax a = (String, [DeclarationSyntax])
 
-data DeclarationSyntax a
-  = Definition String Tm
-  | TypeDecl String Ty
+data DeclarationSyntax
+  = Definition (Name Tm) Tm
+  | TypeDecl (Name Tm) Ty
   deriving (Show)
 
 -- showType :: Int -> Ty -> P.Doc
@@ -116,14 +116,14 @@ file = do
   decls <- (sepBy decl (spaces *> item ';') <* spaces <* eof) <|> (spaces *> pure [] <* eof)
   pure (name, decls)
 
-decl :: Parser SyntaxError (DeclarationSyntax a)
+decl :: Parser SyntaxError DeclarationSyntax
 decl = definition <|> typedecl
 
-typedecl :: Parser SyntaxError (DeclarationSyntax a)
+typedecl :: Parser SyntaxError DeclarationSyntax
 typedecl = do
   name <- identifier
   spaces *> item ':'
-  TypeDecl name <$> generictype
+  TypeDecl (s2n name) <$> generictype
 
 generictype :: Parser SyntaxError Ty
 generictype = fall <|> rule <|> typeExpr
@@ -192,13 +192,13 @@ generickind = kindArrow <|> kindTerm
             "field" -> KField
             "type" -> KType
 
-definition :: Parser SyntaxError (DeclarationSyntax a)
+definition :: Parser SyntaxError DeclarationSyntax
 definition = do
   name <- identifier
   args <- many (s2n <$> identifier)
   spaces *> item '='
   body <- expression (reverse args)
-  pure $ Definition name (foldr mklam body args)
+  pure $ Definition (s2n name) (foldr mklam body args)
   where mklam name body = Lam (bind name body)
 
 type Scope = [Name Tm]

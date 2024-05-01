@@ -1,74 +1,38 @@
 module Backend where
 
+import Unbound.Generics.LocallyNameless
+import GHC.Generics
+import Data.Typeable (Typeable)
 import qualified Data.Set as S
+import Common
+import Lib.Unify (fv')
 
 -- STG directly from...
 --   Making a Fast Curry: Push/Enter vs. Eval/Apply
 --     for Higher-order Languages
 --   Implementing lazy functional languages on stock hardware:
 --     the Spineless Tagless G-machine
-data Obj = Fun [DebruijnIndex] [Id] Expr
+data Obj = Fun [Name Atom] (Bind [Name Atom] Expr)
          | Pap Atom [Atom]
-         | Thunk [DebruijnIndex] Expr
-           deriving (Show)
+         | Thunk [Name Atom] Expr
+           deriving (Show, Generic, Typeable)
 data Expr = Atom Atom
           | Apply Atom [Atom]
-          | Let [Bind] Expr
-          | LetRec [Bind] Expr
-           deriving (Show)
-type Bind = (Id, Obj)
-data Atom = Var DebruijnIndex
-          | Sym Id
+          | Let (Bind (Name Atom, Embed Obj) Expr)
+          -- | LetRec (Bind (Rec [(Name Atom, Embed Obj)]) Expr)
+           deriving (Show, Generic, Typeable)
+data Atom = Var (Name Atom)
           | Lit31i Integer
-           deriving (Show)
-type Id = String
+           deriving (Show, Generic, Typeable)
 type DebruijnIndex = Int
 
+instance Alpha Obj
+instance Alpha Expr
+instance Alpha Atom
+
 -- Helpful constructors for fun and thunk objects.
-fun :: [Id] -> Expr -> Obj
-fun bd e = Fun (binders (length bd) (fvL e))
-               bd e
+fun :: S.Set (Name Atom) -> (Bind [Name Atom] Expr) -> Obj
+fun env bnd = Fun (S.toList (S.intersection env (fv' bnd))) bnd
 
-thunk :: Expr -> Obj
-thunk expr = Thunk (fvL expr) expr
-
--- Free variable computation
-class FV a where
-  fv :: a -> S.Set DebruijnIndex
-
-instance FV Obj where
-  fv (Fun free _ _) = S.fromList free
-  fv (Pap f a) = fv f <> S.unions (map fv a)
-  fv (Thunk free _) = S.fromList free
-
-instance FV Expr where
-  fv (Atom v) = fv v
-  fv (Apply f a) = fv f <> S.unions (map fv a)
-  fv (Let bd e) = fvlet (map snd bd) e
-  fv (LetRec bd e) = bindersS (length bd) (fv e <> S.unions (map fv bd))
-
-fvlet (x:xs) y = fv x <> bindersS 1 (fvlet xs y)
-fvlet [] x = fv x
-
-instance FV Bind where
-  fv (_,o) = fv o
-
-instance FV Atom where
-  fv (Var i) = S.singleton i
-  fv _ = S.empty
-
--- handling of Let/Letrec/Fun
-binders :: Int -> [DebruijnIndex] -> [DebruijnIndex]
-binders i = map (\x -> x - i) . filter (i<=)
-
-fvL = S.toList . fv
-bindersS i = S.fromList . binders i . S.toList
-
--- Demonstration
-demo0 :: [Bind]
-demo0 = [
-  ("I", fun ["x"] (Atom$Var 0)),
-  ("K", fun ["x", "y"] (Atom$Var 1)),
-  ("S", fun ["x", "y", "z"]
-            (Let [("", thunk (Apply (Var 1) [Var 0]))]
-                 (Apply (Var 3) [Var 1, Var 0])))]
+thunk :: S.Set (Name Atom) -> Expr -> Obj
+thunk env expr = Thunk (S.toList (S.intersection env (fv' expr))) expr

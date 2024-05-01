@@ -13,6 +13,7 @@ import Lib.Parser
 import GHC.Generics
 import Data.Typeable (Typeable)
 
+{--
 demo2 = quickParse generickind
         "type → type → type"
 demo1 = quickParse generickind
@@ -27,7 +28,7 @@ demo3 = runEff' $ try $ runUnify initUnify $ freshEff $ do
   ty <- tyMetaInst demo 
   k <- inferKind env ty
   k =|= MKind KType
-  walk ty
+  walk ty --}
 
 -- Not certain whether this kind of coercive rule works.
 (=|=) (MRow _) (MRow _) = pure ()
@@ -151,7 +152,7 @@ generalize (Typing m ty tm) = do
                         ty'' <- walk ty'
                         tm'' <- walk tm'
                         let ty''' = TAll (bind (name, Embed mk) ty'')
-                        let tm''' = PTLam (bind name tm'')
+                        let tm''' = PTLam (bind (name, Embed mk) tm'')
                         pure (ty''', tm''')
 
 instantiate :: (Unify :< eff, Fresh' :< eff) => Ty -> PTm -> Eff eff Typing
