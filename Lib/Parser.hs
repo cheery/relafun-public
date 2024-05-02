@@ -95,7 +95,10 @@ knub err = (nub . filter ((==h) . snd)) err
   where h = (maximum . map snd) err
 
 sepBy :: Alternative f => f a -> f s -> f [a]
-sepBy thing sep = (:) <$> (thing <* sep) <*> (sepBy thing sep) <|> pure <$> thing
+sepBy thing sep = sepBy1 thing sep <|> pure []
+
+sepBy1 :: Alternative f => f a -> f s -> f [a]
+sepBy1 thing sep = (:) <$> (thing <* sep) <*> (sepBy thing sep) <|> pure <$> thing
 
 perhaps :: (a -> Either e b) -> FParser e s p a -> FParser e s p b
 perhaps f (Parser p) = Parser (\input pos -> go (p input pos) pos)

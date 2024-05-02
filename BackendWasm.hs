@@ -6,6 +6,7 @@ import Lib.UnboundEff (Fresh', freshEff)
 import Wasm.Core hiding (Expr)
 import qualified Wasm.CoreWriter as W
 import qualified Wasm.CommonWriting as CW
+import qualified Common as C
 import Sub
 import SubKernel (types)
 import Lib.Graph (Tree(..))
@@ -22,9 +23,14 @@ import Control.Monad.Fail
 instance MonadFail (Eff eff) where
   fail = undefined
 
-compileFile :: FilePath -> [(Bool, Name Atom, Embed Obj)] -> IO ()
-compileFile p bd = CW.writeFile p
-                                (compileDecls types (compile bd))
+compileFile :: FilePath
+            -> [TypeDecl]
+            -> [(Bool, Name Atom, Embed Obj)]
+            -> [(Name Atom, SubFunction)]
+            -> IO ()
+compileFile p localtypes bd subfunctions
+  = CW.writeFile p (compileDecls (types <> localtypes)
+                                 (compile bd subfunctions))
 
 -- Compiler state handling.
 data CompilerState = CompilerState {
@@ -54,9 +60,12 @@ reserveLocal typ = do st <- get @CompilerState
 type KernelMap = M.Map String FuncIdx
 
 -- Actual compiler.
-compile :: [(Bool, Name Atom, Embed Obj)] -> [Declaration Inp]
-compile bd = snd $ runEff' $ writeToList @(Declaration Inp)
-           $ freshEff $ state @CompilerState initCS $ do
+compile :: [(Bool, Name Atom, Embed Obj)]
+        -> [(Name Atom, SubFunction)]
+        -> [Declaration Inp]
+compile bd subfunctions
+  = snd $ runEff' $ writeToList @(Declaration Inp)
+        $ freshEff $ state @CompilerState initCS $ do
   write @(Declaration Inp)
         $ Import "kernel" "eval" (FuncImport (func [refn ANY] [refn ANY]))
   kernelEval <- reserveFuncIdx
@@ -80,8 +89,11 @@ compile bd = snd $ runEff' $ writeToList @(Declaration Inp)
                     ("begin-thunk", kernelBeginThunk),
                     ("resolve", kernelResolve),
                     ("blackhole", kernelBlackhole) ]
-  -- The next line works because we don't export globals.
-  let globals = M.fromList (zip (map (\(_,n,_) -> n) bd) [0..])
+  -- The next lines work because we don't export globals.
+  let bdnames = (map (\(_,n,_) -> n) bd)
+      fnnames = (map (\(n,_) -> n) subfunctions)
+      globals = M.fromList (zip (bdnames<>fnnames) [0..])
+      globals' = M.mapKeys name2String globals
       compileToplevelBind (exp, name, Embed obj)
         = do initializer <- compileObj globals kernelMap True [] obj
              write @(Declaration Inp)
@@ -90,7 +102,21 @@ compile bd = snd $ runEff' $ writeToList @(Declaration Inp)
              then write @(Declaration Inp)
                         $ Export (name2String name) (GlobalExport (globals M.! name))
              else pure ()
+      compileSubFunction (name, (args, body, restype)) = do
+        funref <- reserveFuncIdx
+        let initializer = (I_StructNew "closure" % [
+              I_I32Const (fromIntegral (length args)) % [],
+              I_ArrayNewFixed "values" 0 % [], 
+              I_RefFunc funref % [] ])
+        write @(Declaration Inp)
+              $ Global (refn ANY) Imm initializer
+        write @(Declaration Inp)
+              $ DefSubFunc "closure-func" args body restype globals' kernelMap
+        write @(Declaration Inp)
+              $ Export (name2String name) (GlobalExport (globals M.! name))
+
   mapM_ compileToplevelBind bd
+  mapM_ compileSubFunction subfunctions
 
 compileExpr :: (Write (Declaration Inp) :< eff, Fresh' :< eff,
                State CompilerState :< eff)

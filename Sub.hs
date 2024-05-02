@@ -373,9 +373,24 @@ data Declaration t
   = ElemDeclareFunc Int
   | Global (ValType t) Mut (AST t)
   | DefFunc t [ValType t] [SCF t]
+  | DefSubFunc t [(Bool, String, ValType t)]
+                 [SubBlock t]
+                 (ValType t)
+                 (M.Map String Int)
+                 (M.Map String Int)
   | Export String ExportDesc
   | Import String String (ImportDesc t)
   deriving (Show, Functor, Traversable, Foldable)
+
+type SubFunction = ([(Bool, String, ValType Inp)], [SubBlock Inp], ValType Inp)
+data SubBlock t = SubDo (SubTm t)
+                | SubStore [(String, ValType t)] (SubTm t)
+                | SubReturn [SubTm t]
+                deriving (Show, Functor, Traversable, Foldable)
+data SubTm t = SubVar String
+             | SubApp (SubTm t) (SubTm t)
+             | SubAnn (SubTm t) (ValType t)
+             deriving (Show, Functor, Traversable, Foldable)
 
 compileDecls :: [TypeDecl] -> [Declaration Inp] -> Core
 compileDecls td d = section TypeSection types
@@ -409,5 +424,97 @@ compileDecls td d = section TypeSection types
         (canon,d') = runEff' $ state initCanon $ do
           mapM_ canonicalize (annotateRec td)
           d' <- mapM (mapM getcanon) d
+          canon <- get @CanonState
+          let d'' = map (inferenceStep (toTxTypeMap canon)
+                                       (mapNameToTX canon)) d'
           indices <- toIndices <$> get @CanonState
-          pure $ map (fmap (indices !?)) d'
+          pure $ map (fmap (indices !?)) d''
+        inferenceStep txmap txname (DefSubFunc t args body restype globals kernelMap)
+          = let (l, e) = subInference globals txmap txname kernelMap args body restype
+            in DefFunc t l e
+        inferenceStep _ _ t = t
+
+-- This happens in awkward location.
+data SubEnv = SubEnv [(String, ValType TX)]
+
+subInference :: (M.Map String Int)
+             -> M.Map TX (SubType TX)
+             -> M.Map String TX
+             -> M.Map String Int
+             -> [(Bool, String, ValType TX)]
+             -> [SubBlock TX]
+             -> ValType TX
+             -> ([ValType TX], [SCF TX])
+subInference globals txmap txname kernelMap args body restype
+  = refine $ runEff' $ state (SubEnv nargs) $ ((intro <>) . concat <$> mapM inferBlock body)
+  where refine (SubEnv l, scf) = (map snd l, scf)
+        nargs = [(name, ty) | (_, name, ty) <- args]
+        intro = [
+          Do (I_LocalSet (i+2) % [
+            let getter = I_ArrayGet (txname M.! "values") % [I_LocalGet 1 % [], I_I32Const (fromIntegral i) % []]
+                refcast (R (Ref null ht)) ast = I_RefCast null ht % [ast]
+            in if ev then refcast ty (I_Call (kernelMap M.! "eval") % [ getter ])
+                     else refcast ty getter])
+          | (i, (ev, name, ty)) <- zip [0..] args ]
+        inferBlock (SubDo tm) = do (ast, typs) <- infer tm
+                                   pure $ [Do ast] <> map (\_ -> Do $ I_Drop % []) typs
+        inferBlock (SubStore storg tm) = do ix <- mapM deflocal storg
+                                            ast <- check tm (map snd storg)
+                                            pure $ [Do ast] 
+                                                <> [Do (I_LocalSet (i+2) % [])
+                                                   | i <- reverse ix]
+        inferBlock (SubReturn [tm]) = do ast <- check tm [restype]
+                                         pure [Terminal $ doreturn $ ast]
+        -- TODO: return call optimization.
+        doreturn t = I_Return % [t]
+        deflocal (name,ty) = do SubEnv locals <- get @SubEnv
+                                let locals' = case lookup name locals of
+                                                Nothing -> locals <> [(name, ty)]
+                                                Just _ -> locals
+                                put @SubEnv (SubEnv locals')
+                                case elemIndex (name,ty) locals' of
+                                  Nothing -> error "local type mismatch"
+                                  Just ix -> pure ix
+        infer (SubAnn tm ty) = do ast <- check tm [ty]
+                                  pure (ast, [ty])
+        infer tm = do let head = funroll tm
+                          args = fargs tm
+                      inferable head args
+        check tm restypes = do let head = funroll tm
+                                   args = fargs tm
+                               checkable head args restypes
+        funroll (SubVar s) = s
+        funroll (SubApp f _) = funroll f
+        fargs tm = fargs' tm []
+        fargs' (SubVar _) a = a
+        fargs' (SubApp f x) a = fargs' f (x:a)
+        inferable "get_s" [arg] = do (ast, tys) <- infer arg
+                                     case tys of
+                                       [R (Ref _ I31)] -> pure (I_I31GetS % [ast], [i32])
+                                       tys -> error $ "get_s on " <> show tys
+        inferable name [] = do SubEnv locals <- get @SubEnv
+                               case lookup name locals of
+                                 Just ty -> case elemIndex (name,ty) locals of
+                                                 Just ix -> pure (I_LocalGet (ix+2) % [], [ty])
+                                 Nothing -> case M.lookup name globals of
+                                                 Just ix -> pure (I_GlobalGet ix % [], [refn ANY])
+                                                 Nothing -> error $ "unknown constant " <> name
+        inferable "i31" [arg] = do ast <- check arg [i32]
+                                   pure (I_RefI31 % [ast], [ref I31])
+        inferable "+" [a, b] = do (ast1, ty1) <- infer a
+                                  (ast2, ty2) <- infer b
+                                  if ty1 == ty2 && ty1 == [i32]
+                                  then pure (I_I32Add % [ast1, ast2], [i32])
+                                  else error "type error"
+        inferable name _ = error name
+        checkable "new" args [R (Ref _ (HT i))]
+          | Just (Sub _ _ (Struct fields)) <- M.lookup i txmap
+          , length args == length fields
+          = do asts <- sequence (zipWith (\(ts,_) tm -> check tm [unpack ts]) fields args)
+               pure (I_StructNew i % asts)
+        checkable name args tys' = do (ast,tys) <- inferable name args
+                                      if tys' == tys
+                                      then pure ast
+                                      else error $ "type error at " <> name
+        unpack (U ty) = ty
+        unpack (P _)  = i32

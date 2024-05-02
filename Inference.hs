@@ -138,22 +138,24 @@ rename :: (Fresh' :< eff) => Name a -> Eff eff (Name b)
 rename name = fresh (s2n (name2String name))
 
 generalize :: (Unify :< eff, Fresh' :< eff) => Typing -> Eff eff Typing
-generalize (Typing m ty tm) = do
+generalize (Typing mh tyh tm) = do
+  m <- mapM walk mh
+  ty <- walk tyh
   let g = S.toList (fmv ty S.\\ S.unions (map (fmv.snd) (M.toList m)))
-  (ty', tm') <- gen g
+  (ty', tm') <- gen ty g
   pure (Typing m ty' tm')
   where gen :: (Unify :< eff, Fresh' :< eff)
-            => [MVar MKind Ty] -> Eff eff (Ty, PTm)
-        gen [] = pure (ty, tm)
-        gen (m:ms) = do (ty', tm') <- gen ms
-                        mk <- getMeta m
-                        name <- fresh (s2n "g")
-                        _ <- try (ext m (TVar name))
-                        ty'' <- walk ty'
-                        tm'' <- walk tm'
-                        let ty''' = TAll (bind (name, Embed mk) ty'')
-                        let tm''' = PTLam (bind (name, Embed mk) tm'')
-                        pure (ty''', tm''')
+            => Ty -> [MVar MKind Ty] -> Eff eff (Ty, PTm)
+        gen ty [] = pure (ty, tm)
+        gen ty (m:ms) = do (ty', tm') <- gen ty ms
+                           mk <- getMeta m
+                           name <- fresh (s2n "g")
+                           _ <- try (ext m (TVar name))
+                           ty'' <- walk ty'
+                           tm'' <- walk tm'
+                           let ty''' = TAll (bind (name, Embed mk) ty'')
+                           let tm''' = PTLam (bind (name, Embed mk) tm'')
+                           pure (ty''', tm''')
 
 instantiate :: (Unify :< eff, Fresh' :< eff) => Ty -> PTm -> Eff eff Typing
 instantiate (TAll bnd) tip = do

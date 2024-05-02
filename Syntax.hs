@@ -11,6 +11,8 @@ import Common
 import Unbound.Generics.LocallyNameless
 import Unbound.Generics.LocallyNameless.Unsafe (unsafeUnbind)
 import Lib.Unify
+import Wasm.Core
+import Sub
 
 data SyntaxError
   = EndOfInput
@@ -25,6 +27,11 @@ type FileSyntax a = (String, [DeclarationSyntax])
 data DeclarationSyntax
   = Definition (Name Tm) Tm
   | TypeDecl (Name Tm) Ty
+  | StructDecl (Name Ty) (Bind [Name Ty] [(Name Tm, Ty)])
+  | InstanceDecl Ty Tm
+  | TypeAlias (Name Ty) (Bind ([(Name Ty, Embed MKind)]) (Maybe Ty))
+  | SubFunction (Name Tm) SubFunction
+  | SubType String (SubType Inp)
   deriving (Show)
 
 -- showType :: Int -> Ty -> P.Doc
@@ -108,6 +115,8 @@ instance ParseError SyntaxError where
   unexpected = Unexpected
   noParse = NoParse
 
+type Readable a = Parser SyntaxError a
+
 file :: Parser SyntaxError (FileSyntax a)
 file = do
   keyword "module"
@@ -117,7 +126,176 @@ file = do
   pure (name, decls)
 
 decl :: Parser SyntaxError DeclarationSyntax
-decl = definition <|> typedecl
+decl = definition <|> typedecl <|> structdecl <|> instancedecl
+    <|> typealias <|> subfunction <|> subtype
+
+typealias :: Readable DeclarationSyntax
+typealias = do
+  keyword "type"
+  name <- identifier
+  args <- many genericnamekind
+  body <- pure Nothing <|> (symbol '=' *> (Just <$> generictype))
+  pure (TypeAlias (s2n name) (bind args body))
+
+subfunction :: Readable DeclarationSyntax
+subfunction = do
+  keyword "sub"
+  symbols "function"
+  name <- identifier
+  symbol '('
+  args <- sepBy argfield (symbol ',')
+  symbol ')'
+  restype <- (symbol ':' *> valtype) <|> pure (refn ANY) 
+  symbol '{'
+  body <- sepBy statement (symbol ';')
+  symbol '}'
+  pure (SubFunction (s2n name) (args, body, restype))
+  where argfield = do
+          doeval <- (symbols "noeval" *> pure False) <|> pure True
+          (name,ty) <- nametype
+          pure (doeval, name, ty)
+        nametype = do
+          name <- identifier
+          symbol ':'
+          ty <- valtype
+          pure (name, ty)
+        statement = storagestatement <|> returnstatement <|> dostatement
+        storagestatement = do
+          st <- sepBy1 nametype (symbol ',')
+          symbol '='
+          e <- expr
+          pure (SubStore st e)
+        returnstatement = symbols "return"
+                       *> (SubReturn <$> sepBy expr (symbol ','))
+        dostatement = SubDo <$> expr
+        expr = exprAnn <|> exprPlus
+        exprAnn = do
+          tm <- exprPlus
+          symbol ':'
+          ty <- valtype
+          pure (SubAnn tm ty)
+        exprPlus = do
+          tm <- exprApp
+          tms <- many (symbol '+' *> exprApp)
+          pure (foldl mkplus tm tms)
+        mkplus a b = SubApp (SubApp (SubVar "+") a) b
+        exprApp = do
+          tm <- exprTerm
+          tms <- many exprTerm
+          pure (foldl SubApp tm tms)
+        exprTerm = (symbol '(' *> expr <* symbol ')')
+               <|> (SubVar <$> identifier)
+
+subtype :: Readable DeclarationSyntax
+subtype = do
+  keyword "sub"
+  keyword "type"
+  name <- identifier
+  symbol '='
+  sub <- subtype
+  pure (SubType name sub)
+  where subtype = fullsub <|> (Sub True [] <$> comptype)
+        fullsub = do
+          keyword "sub"
+          final <- (symbols "final" *> pure True) <|> pure False
+          symbol '('
+          supers <- sepBy (Symbol <$> identifier) (symbol ',')
+          symbol ')'
+          ct <- comptype
+          pure (Sub final supers ct)
+
+valtype :: Readable (ValType Inp)
+valtype = do
+          head <- identifier
+          case head of
+            "i32" -> pure i32
+            "i64" -> pure i64
+            "f32" -> pure f32
+            "f64" -> pure f64
+            "v128" -> pure v128
+            "ref" -> fromRefType <$> reftype
+            _ -> empty
+  where reftype = do
+           nullable <- (symbols "null" *> pure True) <|> pure False   
+           ht <- heaptype
+           pure (Ref nullable ht)
+        heaptype = (HT . Direct <$> comptype) <|> do
+          head <- word
+          case head of
+            "any" -> pure ANY
+            "eq" -> pure Wasm.Core.EQ
+            "i31" -> pure I31
+            "struct" -> pure STRUCT
+            "array" -> pure ARRAY
+            "none" -> pure NONE
+            "func" -> pure FUNC
+            "nofunc" -> pure NOFUNC
+            "extern" -> pure EXTERN
+            "noextern" -> pure NOEXTERN
+            _ -> pure (HT (Symbol head))
+
+comptype = array <|> struct <|> func
+  where array = do
+          symbols "array"
+          ft <- fieldtype
+          pure (Array ft)
+        struct = do
+          symbols "struct"
+          symbol '{'
+          fts <- sepBy fieldtype (symbol ';')
+          symbol '}'
+          pure (Struct fts)
+        func = do
+          symbols "func"
+          symbol '('
+          args <- sepBy valtype (symbol ',')
+          symbol ')'
+          res <- manyResult <|> oneResult <|> pure []
+          pure (Func args res)
+        fieldtype = do
+          mut <- (symbols "imm" *> pure Imm)
+             <|> (symbols "mut" *> pure Mut)
+          st <- storagetype
+          pure (st, mut)
+        storagetype = (U <$> valtype) <|> packedtype
+        packedtype = do
+          head <- identifier
+          case head of
+            "i8" -> pure i8
+            "i16" -> pure i16
+            _ -> empty
+        manyResult = do
+          symbol '→'
+          symbol '('
+          results <- sepBy valtype (symbol ',')
+          symbol ')'
+          pure results
+        oneResult = do
+          symbol '→'
+          pure <$> valtype
+
+structdecl :: Parser SyntaxError DeclarationSyntax
+structdecl = do
+  keyword "struct"
+  name <- identifier
+  targs <- many (s2n <$> identifier)
+  spaces *> item '{'
+  labels <- sepBy labeldecl (spaces *> item ';')
+  spaces *> item '}'
+  pure (StructDecl (s2n name) (bind targs labels))
+  where labeldecl = do
+          label <- s2n <$> identifier
+          spaces *> item ':'
+          ty <- generictype
+          pure (label, ty)
+
+instancedecl :: Parser SyntaxError DeclarationSyntax
+instancedecl = do
+  keyword "instance"
+  ty <- generictype
+  spaces *> item '='
+  tm <- expression
+  pure (InstanceDecl ty tm)
 
 typedecl :: Parser SyntaxError DeclarationSyntax
 typedecl = do
@@ -129,16 +307,11 @@ generictype :: Parser SyntaxError Ty
 generictype = fall <|> rule <|> typeExpr
   where fall = do
           spaces *> item '∀'
-          namekinds <- some (mrowkind <|> pkind <|> ((,MKind (KMeta holeMVar)) <$> s2n <$> identifier))
-
+          namekinds <- some genericnamekind
           spaces *> item '.'
           ty <- rule <|> typeExpr
           pure (foldr mktall ty namekinds)
-        mktall (name, kind) ty = TAll (bind (name, Embed kind) ty)
-        pkind = spaces *> item '(' *> (mrowkind <|> mkind) <* spaces <* item ')'
-        mrowkind = (,) <$> (s2n <$> identifier)
-                       <*> (MRow . sort <$> some (spaces *> item '^' *> identifier))
-        mkind = (,) <$> (s2n <$> identifier) <*> (spaces *> item ':' *> (MKind <$> generickind))
+        mktall namekind ty = TAll (bind namekind ty)
         rule = do
           l <- typeExpr
           spaces *> item '⇒'
@@ -180,12 +353,19 @@ generictype = fall <|> rule <|> typeExpr
                       e <- many typeTerm
                       pure (n, TFPresent e)
 
+genericnamekind = emb <$> (mrowkind <|> pkind <|> ((,MKind (KMeta holeMVar)) <$> s2n <$> identifier))
+  where emb (x,y) = (x, Embed y)
+        pkind = spaces *> item '(' *> (mrowkind <|> mkind) <* spaces <* item ')'
+        mrowkind = (,) <$> (s2n <$> identifier)
+                       <*> (MRow . sort <$> some (spaces *> item '^' *> identifier))
+        mkind = (,) <$> (s2n <$> identifier) <*> (spaces *> item ':' *> (MKind <$> generickind))
+
 generickind = kindArrow <|> kindTerm
   where kindArrow = (:->:) <$> kindTerm <*> (spaces *> item '→' *> generickind)
         kindTerm = kindTerm1 <|> kindTerm2
         kindTerm1 = (spaces *> item '(' *> generickind <* spaces <* item ')')
         kindTerm2 = do
-          i <- identifier
+          i <- word
           pure $ case i of
             "_" -> KMeta holeMVar
             "row" -> KRow
@@ -197,43 +377,61 @@ definition = do
   name <- identifier
   args <- many (s2n <$> identifier)
   spaces *> item '='
-  body <- expression (reverse args)
+  body <- expression
   pure $ Definition (s2n name) (foldr mklam body args)
   where mklam name body = Lam (bind name body)
 
-type Scope = [Name Tm]
-
-expression :: Scope -> Parser SyntaxError Tm
-expression r = lambda <|> letExpr <|> apply
+expression :: Parser SyntaxError Tm
+expression = lambda <|> letExpr <|> apply
   where lambda = do 
           spaces *> item 'λ'
           names <- some (s2n <$> identifier)
           spaces *> item '.'
-          body <- expression (reverse names <> r)
+          body <- expression
           pure (foldr mklam body names)
         mklam name body = Lam (bind name body)
-        letExpr = keyword "let" *> letCont r
-        letCont r = do
-          name <- s2n <$> identifier
+        letExpr = keyword "let" *> letCont
+        letCont = do
+          name <- (pure Nothing <* spaces <* item '?')
+              <|> (Just . s2n <$> identifier)
           spaces *> item '='
-          arg <- expression r
-          body <- (spaces *> item ';' *> letCont (name:r)) <|> letEnd (name:r)
-          pure (Let (bind (name, Embed arg) body))
-        letEnd r = do
+          arg <- expression
+          body <- (spaces *> item ';' *> letCont) <|> letEnd
+          case name of
+            Nothing -> pure (ILet arg body)
+            Just name -> pure (Let (bind (name, Embed arg) body))
+        letEnd = do
           keyword "in"
-          body <- expression r
+          body <- expression
           pure body
         apply = do
-          t <- term
-          exprs <- many (lambda <|> letExpr <|> term)
+          t <- termsuffix
+          exprs <- many (lambda <|> letExpr <|> termsuffix)
           pure (foldl App t exprs)
-        term = (spaces *> item '(' *> expression r <* spaces <* item ')')
-           <|> num <|> ident
+        termsuffix = iapp <|> term
+        iapp = do x <- term
+                  spaces *> item '§'
+                  f <- term
+                  pure (App f x)
+        term = (spaces *> item '(' *> expression <* spaces <* item ')')
+           <|> num <|> ident <|> query <|> structure
         num = do
           fmap (Lit . read) (spaces *> some (satisfy isDigit))
         ident = do
           name <- identifier
           pure (Var (s2n name))
+        query = spaces *> item '?' *> pure Query
+        structure = do
+          keyword "struct"
+          spaces *> item '{'
+          labels <- sepBy structfield (spaces *> item ';')
+          spaces *> item '}'
+          pure (TmStruct labels)
+        structfield = do
+          id <- identifier
+          spaces *> item '='
+          tm <- expression
+          pure (id, tm)
 
 identifier :: Parser SyntaxError String
 identifier = perhaps notKw word
@@ -246,14 +444,20 @@ keyword name = perhaps isKw word
                | otherwise = Left (ExpectedGot name n)
 
 keywords :: [String]
-keywords = ["let", "in", "module", "where", "absent", "present"]
+keywords = ["let", "in", "module", "where", "absent", "present", "struct", "instance", "sub", "type"]
 
 word :: Parser SyntaxError String
 word = do
   spaces
   h <- satisfy isAlpha
-  i <- many (satisfy isAlphaNum)
+  i <- many (satisfy (\a -> a == '_' || isAlphaNum a))
   pure (h:i)
+
+symbols :: String -> Readable String
+symbols s = (spaces *> items s)
+
+symbol :: Char -> Readable Char
+symbol s = (spaces *> item s)
 
 spaces :: Parser SyntaxError [Char]
 spaces = many (satisfy isSpace)

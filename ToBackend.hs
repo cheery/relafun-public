@@ -64,7 +64,8 @@ pobj env (YLet bnd) = do
        else do n <- fresh (s2n (name2String name))
                hoist env n tm1
   pobj (M.insert name a env) tm2
-pobj env (YVar n) = pure $ PAtom (setify env) (env M.! n)
+pobj env (YVar n) | Just m <- M.lookup n env = pure $ PAtom (setify env) m
+                  | otherwise = pure $ PAtom (setify env) (EAtom $ B.Var $ s2n (name2String n))
 pobj env (YLit i) = pure $ PAtom (setify env) (EAtom $ B.Lit31i i)
                                
 hoist :: (Write (Name B.Atom, Embed B.Obj) :< eff, Fresh' :< eff)

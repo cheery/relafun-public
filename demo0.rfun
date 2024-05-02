@@ -1,5 +1,6 @@
 module demo0 where
 
+I : ∀a. a → a;
 I x = x;
 
 K x y = x;
