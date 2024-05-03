@@ -1,12 +1,12 @@
-{-# LANGUAGE OverloadedStrings, TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings, TypeFamilies, GADTs #-}
 module Sub where
 
-import Debug.Trace
-
+import Control.Lens hiding (index, Context)
+import Data.Proxy
 import Data.Maybe (mapMaybe)
 import Lib.ContEff hiding (Context)
 import Data.String (IsString(..))
-import Wasm.Core hiding (Expr)
+import Wasm.Core
 
 -- For computing the SCC from typedecls, and for cfg graph manipulation.
 import Lib.Graph (scc', preorder, buildG, sortedDomTree, rpnum, postorder, postorderF, dfs, transposeG, Tree(..))
@@ -152,13 +152,14 @@ toIndices st = M.fromList $ zip [(k,v)
                                  | (k,vs) <- M.toAscList (mapToCanon st),
                                    v <- [0..length vs - 1]] [0..]
 
--- txTypeMap is for type checking.
-toTxTypeMap :: CanonState -> M.Map TX (SubType TX)
-toTxTypeMap st = M.fromList [((i,j), fmap (g i) p)
-                            | (i, s) <- M.toAscList (mapToCanon st),
+-- typeMap is for type checking.
+toTypeMap :: CanonState -> M.Map Int (SubType Int)
+toTypeMap st = M.fromList [(ix M.! (i,j), fmap (g i) p)
+                          | (i, s) <- M.toAscList (mapToCanon st),
                               (p,j) <- zip s [0..]]
-  where g ind (Idx i) = i
-        g ind (RecIdx k) = (ind, k)
+  where g ind (Idx i) = ix M.! i
+        g ind (RecIdx k) = ix M.! (ind, k)
+        ix = toIndices st
 
 -- Structured control flow
 data SCF t
@@ -368,20 +369,6 @@ index label (frame : context)
         matchesFrame label (LoopHeadedBy l)    = (label == l)
         matchesFrame _ _ = False
 
--- Declarations, which form the toplevel of the module.
-data Declaration t
-  = ElemDeclareFunc Int
-  | Global (ValType t) Mut (AST t)
-  | DefFunc t [ValType t] [SCF t]
-  | DefSubFunc t [(Bool, String, ValType t)]
-                 [SubBlock t]
-                 (ValType t)
-                 (M.Map String Int)
-                 (M.Map String Int)
-  | Export String ExportDesc
-  | Import String String (ImportDesc t)
-  deriving (Show, Functor, Traversable, Foldable)
-
 type SubFunction = ([(Bool, String, ValType Inp)], [SubBlock Inp], ValType Inp)
 data SubBlock t = SubDo (SubTm t)
                 | SubStore [(String, ValType t)] (SubTm t)
@@ -392,59 +379,93 @@ data SubTm t = SubVar String
              | SubAnn (SubTm t) (ValType t)
              deriving (Show, Functor, Traversable, Foldable)
 
-compileDecls :: [TypeDecl] -> [Declaration Inp] -> Core
-compileDecls td d = section TypeSection types
-                  . section ImportSection imports
-                  . section FunctionSection funcTypes
-                  . section GlobalSection globals
-                  . section ExportSection exports
-                  . section ElementSection elements
-                  . section CodeSection codes $ []
-  where section sec xs | length xs > 0 = (sec xs:)
-                       | otherwise     = id
-        types = toTypeSection canon
-        imports = mapMaybe getImport d'
-        getImport (Import n m i) = Just (n,m,i)
-        getImport _ = Nothing
-        funcTypes = mapMaybe getFuncType d'
-        getFuncType (DefFunc t _ _) = Just t
-        getFuncType _ = Nothing
-        globals = mapMaybe getGlobal d'
-        getGlobal (Global vt m e) = Just ((vt,m), postorder e)
-        getGlobal _ = Nothing
-        exports = mapMaybe getExport d'
-        getExport (Export name desc) = Just (name,desc)
-        getExport _ = Nothing
-        elements = mapMaybe getElement d'
-        getElement (ElemDeclareFunc f) = Just (Elem3 ElemKindRefFunc [f])
-        getElement _ = Nothing
-        codes = mapMaybe getCode d'
-        getCode (DefFunc _ l e) = Just (l, wasmCfg (structuredControl (toCfg e)))
-        getCode _ = Nothing
-        (canon,d') = runEff' $ state initCanon $ do
-          mapM_ canonicalize (annotateRec td)
-          d' <- mapM (mapM getcanon) d
-          canon <- get @CanonState
-          let d'' = map (inferenceStep (toTxTypeMap canon)
-                                       (mapNameToTX canon)) d'
-          indices <- toIndices <$> get @CanonState
-          pure $ map (fmap (indices !?)) d''
-        inferenceStep txmap txname (DefSubFunc t args body restype globals kernelMap)
-          = let (l, e) = subInference globals txmap txname kernelMap args body restype
-            in DefFunc t l e
-        inferenceStep _ _ t = t
+data Output a = Output {
+  _typeSection :: [RecType a],
+  _importSection :: [(String, String, ImportDesc a)],
+  _functionSection :: [a],
+  _globalSection :: [((ValType a, Mut), (Expr a))],
+  _exportSection :: [(String, ExportDesc)],
+  _elementSection :: [Elem],
+  _codeSection :: [([ValType a], Expr a)] }
+  deriving (Show, Functor, Traversable, Foldable)
+
+emptyOutput = Output [] [] [] [] [] [] []
+
+typeSection f m = fmap (\a -> m {_typeSection = a}) (f (_typeSection m))
+importSection f m = fmap (\a -> m {_importSection = a}) (f (_importSection m))
+functionSection f m = fmap (\a -> m {_functionSection = a}) (f (_functionSection m))
+globalSection f m = fmap (\a -> m {_globalSection = a}) (f (_globalSection m))
+exportSection f m = fmap (\a -> m {_exportSection = a}) (f (_exportSection m))
+elementSection f m = fmap (\a -> m {_elementSection = a}) (f (_elementSection m))
+codeSection f m = fmap (\a -> m {_codeSection = a}) (f (_codeSection m))
+
+-- For easier insertion.
+push :: forall a b eff. (State a :< eff)
+     => Lens' a [b] -> b -> Eff eff ()
+push lens item = modify @a (over lens (item:))
+
+data SubState f = SubState {
+  _subCanon :: CanonState,
+  _subOutput :: Output Int,
+  _subTypeMap :: M.Map Int (SubType Int),
+  _subNameMap :: M.Map String Int,
+  _subExtra :: f }
+
+subCanon f m = fmap (\a -> m {_subCanon = a}) (f (_subCanon m))
+subOutput f m = fmap (\a -> m {_subOutput = a}) (f (_subOutput m))
+subTypeMap f m = fmap (\a -> m {_subTypeMap = a}) (f (_subTypeMap m))
+subNameMap f m = fmap (\a -> m {_subNameMap = a}) (f (_subNameMap m))
+subExtra f m = fmap (\a -> m {_subExtra = a}) (f (_subExtra m))
+
+-- Some push helpers where needed.
+global vt m e = ((vt, m), postorder e)
+elemDeclareFunc f = (Elem3 ElemKindRefFunc [f])
+code labels body = (labels, wasmCfg (structuredControl (toCfg body)))
+
+compileDecls typedecls output extra envelope subStage = do
+  (canon, (output', envelope')) <- state initCanon $ do
+    mapM_ canonicalize (annotateRec typedecls)
+    output' <- mapM getcanon output
+    envelope' <- mapM getcanon envelope
+    pure (output', envelope')
+  let indices = toIndices canon
+      nameMap = fmap (indices M.!) (mapNameToTX canon)
+      output'' = fmap (indices M.!) output'
+      envelope'' = fmap (indices M.!) envelope'
+      subState = SubState {
+        _subCanon = canon,
+        _subOutput = over typeSection
+                          (reverse (toTypeSection canon) <>)
+                          output'' ,
+        _subTypeMap = toTypeMap canon,
+        _subNameMap = nameMap,
+        _subExtra = extra }
+  (subState', ()) <- state subState (subStage envelope'')
+  pure (outputCore (subState'^.subOutput))
+
+outputCore :: Output Int -> Core
+outputCore output = section TypeSection (output^.typeSection)
+                  . section ImportSection (output^.importSection)
+                  . section FunctionSection (output^.functionSection)
+                  . section GlobalSection (output^.globalSection)
+                  . section ExportSection (output^.exportSection)
+                  . section ElementSection (output^.elementSection)
+                  . section CodeSection (output^.codeSection) $ []
+  where section sec [] = id
+        section sec xs = (sec (reverse xs):)
 
 -- This happens in awkward location.
-data SubEnv = SubEnv [(String, ValType TX)]
+data SubEnv a = SubEnv [(String, ValType a)]
 
-subInference :: (M.Map String Int)
-             -> M.Map TX (SubType TX)
-             -> M.Map String TX
+subInference :: forall a. (Ord a, Show a)
+             => (M.Map String Int)
+             -> M.Map a (SubType a)
+             -> M.Map String a
              -> M.Map String Int
-             -> [(Bool, String, ValType TX)]
-             -> [SubBlock TX]
-             -> ValType TX
-             -> ([ValType TX], [SCF TX])
+             -> [(Bool, String, ValType a)]
+             -> [SubBlock a]
+             -> ValType a
+             -> ([ValType a], [SCF a])
 subInference globals txmap txname kernelMap args body restype
   = refine $ runEff' $ state (SubEnv nargs) $ ((intro <>) . concat <$> mapM inferBlock body)
   where refine (SubEnv l, scf) = (map snd l, scf)
@@ -467,11 +488,11 @@ subInference globals txmap txname kernelMap args body restype
                                          pure [Terminal $ doreturn $ ast]
         -- TODO: return call optimization.
         doreturn t = I_Return % [t]
-        deflocal (name,ty) = do SubEnv locals <- get @SubEnv
+        deflocal (name,ty) = do SubEnv locals <- get @(SubEnv a)
                                 let locals' = case lookup name locals of
                                                 Nothing -> locals <> [(name, ty)]
                                                 Just _ -> locals
-                                put @SubEnv (SubEnv locals')
+                                put @(SubEnv a) (SubEnv locals')
                                 case elemIndex (name,ty) locals' of
                                   Nothing -> error "local type mismatch"
                                   Just ix -> pure ix
@@ -492,7 +513,7 @@ subInference globals txmap txname kernelMap args body restype
                                      case tys of
                                        [R (Ref _ I31)] -> pure (I_I31GetS % [ast], [i32])
                                        tys -> error $ "get_s on " <> show tys
-        inferable name [] = do SubEnv locals <- get @SubEnv
+        inferable name [] = do SubEnv locals <- get @(SubEnv a)
                                case lookup name locals of
                                  Just ty -> case elemIndex (name,ty) locals of
                                                  Just ix -> pure (I_LocalGet (ix+2) % [], [ty])

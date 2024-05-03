@@ -25,8 +25,11 @@ types = [
             (ref "closure", Imm),
             (ref "values", Imm) ] ]
 
+{--
+The current compiler makes it harder to
+define values like this.
 
-contents :: [Declaration Inp]
+contents :: [SuperDeclaration Inp]
 contents = [
   ElemDeclareFunc 0, -- thunk-blackhole
   Export "blackhole" (FuncExport 0),
@@ -105,9 +108,10 @@ contents = [
           [Do $ I_StructSet "thunk" 1 % [I_LocalGet 1 % [], I_LocalGet 0 % []],
            Do $ I_StructSet "thunk" 0 % [I_LocalGet 1 % [], I_RefFunc 4 % []],
            Terminal $ I_Return % [I_LocalGet 0 % []]]
-  ]
+  ] 
 
 compile = CW.writeFile "subkernel.wasm" (compileDecls types contents)
+--}
 
 --   (func $begin-thunk (export "begin-thunk") (param (ref $thunk)) (result (ref $values))
 --       local.get 0

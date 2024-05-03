@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, ImplicitParams, OverloadedStrings #-}
 module Compiler where
 
+import Control.Lens
 import Lib.UnboundEff (Fresh', freshEff)
 import Lib.Unify
 import Unbound.Generics.LocallyNameless
@@ -33,13 +34,12 @@ entry inf outf = do
   case quickParse file text of
     Left err -> print err
     Right (name, decls) -> do
-      let types = mapMaybe typeDeclOnly decls
-      let aliases = mapMaybe typeAliasesOnly decls
+      let types = decls^.typeDecls
+      let aliases = decls^.typeAliases
       let kinds = [(s2n "→", MKind (KType :->: (KType :->: KType)))]
-     
-      let subtypes = mapMaybe subTypeOnly decls
-      let subfunctions = mapMaybe subFunctionOnly decls
-      let blocks = sccBlocks (mapMaybe (defOnly fv') decls)
+      let subtypes = decls^.subTypes
+      let subfunctions = decls^.subFunctions
+      let blocks = sccBlocks [(name, fv' tm) | (name, tm) <- decls^.definitions]
       let ((tp,prog), err) = snd $ runEff'
                     $ runUnify initUnify
                     $ freshEff
@@ -92,13 +92,13 @@ proceed kinds aliases types blocks decls = do
   foldM (declBlock decls) (typeMap, []) blocks
 
 declBlock :: (Unify :< eff, Fresh' :< eff, Write (Name Tm, InferenceError) :< eff)
-          => [DeclarationSyntax]
+          => ModuleContents
           -> (M.Map (Name Tm) Var, [(Name YTm, YTm)])
           -> [Name Tm]
           -> Eff eff (M.Map (Name Tm) Var, [(Name YTm, YTm)])
 declBlock decls (types, prog) block = do
   let terms = filter (\(name,_) -> name `elem` block)
-            $ mapMaybe (defOnly id) decls
+            $ decls^.definitions
   let perTerm (name, term)
         = do (Typing m ty ptm, errs) <- writeToList @InferenceError
                                       $ infer types term
@@ -124,23 +124,3 @@ sccBlocks defs = map (map (defMapF M.!) . preorder) (scc' graph)
         defMap   = zip [0..] (S.toList defNames)
         defNames = S.fromList (map fst defs)
         invert m = fmap (\(a,b) -> (b,a)) m
-
-defOnly :: (Tm -> a) -> DeclarationSyntax -> Maybe (Name Tm, a)
-defOnly f (Definition name expr) = Just (name, f expr)
-defOnly _ _                      = Nothing
-
-subFunctionOnly :: DeclarationSyntax -> Maybe (Name Tm, SubFunction)
-subFunctionOnly (SubFunction name func) = Just (name, func)
-subFunctionOnly _                 = Nothing
-
-subTypeOnly :: DeclarationSyntax -> Maybe TypeDecl
-subTypeOnly (SubType name ty) = Just (name, ty)
-subTypeOnly _                 = Nothing
-
-typeDeclOnly :: DeclarationSyntax -> Maybe (Name Tm, Ty)
-typeDeclOnly (TypeDecl name ty) = Just (name, ty)
-typeDeclOnly _                   = Nothing
-
-typeAliasesOnly :: DeclarationSyntax -> Maybe (Name Ty, Bind [(Name Ty, Embed MKind)] (Maybe Ty))
-typeAliasesOnly (TypeAlias name bnd) = Just (name, bnd)
-typeAliasesOnly _                    = Nothing

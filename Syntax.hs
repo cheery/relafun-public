@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeFamilies, ImplicitParams, OverloadedStrings #-}
 module Syntax where
 
+import Control.Lens
 import Control.Applicative (Alternative (..))
 import Data.Char
 import Data.List (elemIndex, sort)
@@ -22,17 +23,28 @@ data SyntaxError
   | NoParse
   deriving (Eq, Show)
 
-type FileSyntax a = (String, [DeclarationSyntax])
+type FileSyntax a = (String, ModuleContents)
 
-data DeclarationSyntax
-  = Definition (Name Tm) Tm
-  | TypeDecl (Name Tm) Ty
-  | StructDecl (Name Ty) (Bind [Name Ty] [(Name Tm, Ty)])
-  | InstanceDecl Ty Tm
-  | TypeAlias (Name Ty) (Bind ([(Name Ty, Embed MKind)]) (Maybe Ty))
-  | SubFunction (Name Tm) SubFunction
-  | SubType String (SubType Inp)
-  deriving (Show)
+data ModuleContents = ModuleContents {
+  _definitions :: [(Name Tm, Tm)],
+  _typeDecls   :: [(Name Tm, Ty)],
+  _structDecls :: [(Name Ty, Bind [Name Ty] [(Name Tm, Ty)])],
+  _instanceDecls :: [(Ty, Tm)],
+  _typeAliases :: [(Name Ty, Bind [(Name Ty, Embed MKind)] (Maybe Ty))],
+  _subFunctions :: [(Name Tm, SubFunction)],
+  _subTypes :: [(String, SubType Inp)] }
+
+emptyModule = ModuleContents [] [] [] [] [] [] []
+
+-- bar :: Lens' (Foo a) Int
+-- bar :: Functor f => (Int -> f Int) -> Foo a -> f (Foo a)
+definitions f m = fmap (\a -> m {_definitions = a}) (f (_definitions m))
+typeDecls f m = fmap (\a -> m {_typeDecls = a}) (f (_typeDecls m))
+structDecls f m = fmap (\a -> m {_structDecls = a}) (f (_structDecls m))
+instanceDecls f m = fmap (\a -> m {_instanceDecls = a}) (f (_instanceDecls m))
+typeAliases f m = fmap (\a -> m {_typeAliases = a}) (f (_typeAliases m))
+subFunctions f m = fmap (\a -> m {_subFunctions = a}) (f (_subFunctions m))
+subTypes f m = fmap (\a -> m {_subTypes = a}) (f (_subTypes m))
 
 -- showType :: Int -> Ty -> P.Doc
 -- showType r (TAll bnd) = "∀"
@@ -116,6 +128,9 @@ instance ParseError SyntaxError where
   noParse = NoParse
 
 type Readable a = Parser SyntaxError a
+type DeclarationSyntax = ModuleContents -> ModuleContents
+
+include lens item = over lens (item:)
 
 file :: Parser SyntaxError (FileSyntax a)
 file = do
@@ -123,7 +138,7 @@ file = do
   name <- identifier
   keyword "where"
   decls <- (sepBy decl (spaces *> item ';') <* spaces <* eof) <|> (spaces *> pure [] <* eof)
-  pure (name, decls)
+  pure (name, foldr ($) emptyModule decls)
 
 decl :: Parser SyntaxError DeclarationSyntax
 decl = definition <|> typedecl <|> structdecl <|> instancedecl
@@ -135,7 +150,7 @@ typealias = do
   name <- identifier
   args <- many genericnamekind
   body <- pure Nothing <|> (symbol '=' *> (Just <$> generictype))
-  pure (TypeAlias (s2n name) (bind args body))
+  pure $ include typeAliases (s2n name, bind args body)
 
 subfunction :: Readable DeclarationSyntax
 subfunction = do
@@ -149,7 +164,7 @@ subfunction = do
   symbol '{'
   body <- sepBy statement (symbol ';')
   symbol '}'
-  pure (SubFunction (s2n name) (args, body, restype))
+  pure $ include subFunctions (s2n name, (args, body, restype))
   where argfield = do
           doeval <- (symbols "noeval" *> pure False) <|> pure True
           (name,ty) <- nametype
@@ -193,7 +208,7 @@ subtype = do
   name <- identifier
   symbol '='
   sub <- subtype
-  pure (SubType name sub)
+  pure $ include subTypes (name, sub)
   where subtype = fullsub <|> (Sub True [] <$> comptype)
         fullsub = do
           keyword "sub"
@@ -282,7 +297,7 @@ structdecl = do
   spaces *> item '{'
   labels <- sepBy labeldecl (spaces *> item ';')
   spaces *> item '}'
-  pure (StructDecl (s2n name) (bind targs labels))
+  pure $ include structDecls (s2n name, bind targs labels)
   where labeldecl = do
           label <- s2n <$> identifier
           spaces *> item ':'
@@ -295,13 +310,14 @@ instancedecl = do
   ty <- generictype
   spaces *> item '='
   tm <- expression
-  pure (InstanceDecl ty tm)
+  pure $ include instanceDecls (ty, tm)
 
 typedecl :: Parser SyntaxError DeclarationSyntax
 typedecl = do
   name <- identifier
   spaces *> item ':'
-  TypeDecl (s2n name) <$> generictype
+  ty <- generictype
+  pure $ include typeDecls (s2n name, ty)
 
 generictype :: Parser SyntaxError Ty
 generictype = fall <|> rule <|> typeExpr
@@ -378,7 +394,7 @@ definition = do
   args <- many (s2n <$> identifier)
   spaces *> item '='
   body <- expression
-  pure $ Definition (s2n name) (foldr mklam body args)
+  pure $ include definitions (s2n name, foldr mklam body args)
   where mklam name body = Lam (bind name body)
 
 expression :: Parser SyntaxError Tm
