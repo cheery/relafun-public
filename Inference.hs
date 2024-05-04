@@ -1,3 +1,4 @@
+{-# LANGUAGE ImplicitParams #-}
 module Inference where
 
 import Lib.ContEff
@@ -13,23 +14,6 @@ import Lib.Parser
 import GHC.Generics
 import Data.Typeable (Typeable)
 
-{--
-demo2 = quickParse generickind
-        "type → type → type"
-demo1 = quickParse generickind
-        "row → type"
-demo0 = quickParse generictype
-        "∀a r^x. a → row {x a | r}"
-demo3 = runEff' $ try $ runUnify initUnify $ freshEff $ do
-  let Right kind = demo1
-      Right arrowKind = demo2
-      Right demo = demo0
-      env = [(s2n "row", MKind kind), (s2n "→", MKind arrowKind)]
-  ty <- tyMetaInst demo 
-  k <- inferKind env ty
-  k =|= MKind KType
-  walk ty --}
-
 -- Not certain whether this kind of coercive rule works.
 (=|=) (MRow _) (MRow _) = pure ()
 (=|=) (MRow _) (MKind t) = (t === KRow)
@@ -39,6 +23,7 @@ demo3 = runEff' $ try $ runUnify initUnify $ freshEff $ do
 -- Remove type/kind holes in the expression.
 tyMetaInst :: (Unify :< eff, Fresh' :< eff) => Ty -> Eff eff Ty
 tyMetaInst (TVar name) = pure (TVar name)
+tyMetaInst (TIdent name) = pure (TIdent name)
 tyMetaInst (TMeta meta) | meta == holeMVar = do
   k <- KMeta <$> freshMeta ()
   t <- TMeta <$> freshMeta (MKind k)
@@ -80,10 +65,12 @@ remove x [] = Nothing
 remove x (y:ys) | x == y = Just ys
                 | otherwise = (y:) <$> remove x ys
 
-inferKind :: (Abort :< eff, Fresh' :< eff, Unify :< eff)
+inferKind :: (Abort :< eff, Fresh' :< eff, Unify :< eff, ?kinds :: [(Ident, MKind)])
           => [(Name Ty, MKind)] -> Ty -> Eff eff MKind
 inferKind env (TVar name) | Just k <- lookup name env = pure k
                           | otherwise = error $ "Kind lookup failed: " <> show name
+inferKind env (TIdent (PId name)) | Just k <- lookup name ?kinds = pure k
+                                  | otherwise = error $ "Kind lookup failed: " <> show name
 inferKind env (TMeta meta) = getMeta meta
 inferKind env (TRField label ty row) = do
   kr <- inferKind env row
@@ -132,7 +119,7 @@ data InferenceError = WontApply Tm Tm Typing Typing
                     deriving (Show, Generic, Typeable)
 
 arrow :: Ty -> Ty -> Ty
-arrow a b = (TVar (s2n "→") :$: a) :$: b
+arrow a b = (TIdent (PId (s2n "→")) :$: a) :$: b
 
 rename :: (Fresh' :< eff) => Name a -> Eff eff (Name b)
 rename name = fresh (s2n (name2String name))
@@ -170,8 +157,20 @@ instantiate (TRule c ty) tip = do
 instantiate ty tip = do
   pure (Typing M.empty ty tip)
 
-infer :: (Write InferenceError :< eff, Fresh' :< eff, Unify :< eff)
+infer :: (Write InferenceError :< eff, Fresh' :< eff, Unify :< eff,
+          ?typeMap :: M.Map Ident Var)
       => IEnv -> Tm -> Eff eff Typing
+infer env (Ident (PId name)) | Just var <- M.lookup name ?typeMap
+                             = case var of
+                                 Mono name -> do ty <- TMeta <$> freshMeta (MKind KType)
+                                                 pure (Typing (M.singleton name ty) ty (PVar name))
+                                 Poly name ty -> instantiate ty (PVar name)
+                             | otherwise
+                             = do ty <- TMeta <$> freshMeta (MKind KType)
+                                  write (NotPresent (s2n (name2String name)) ty)
+                                  let tm = PVar (s2n (name2String name))
+                                  pure (Typing M.empty ty tm)
+
 infer env (Var name) | Just var <- M.lookup name env
                      = case var of
                          Mono name -> do ty <- TMeta <$> freshMeta (MKind KType)
@@ -222,4 +221,4 @@ infer env (App f x) = do
     Nothing -> do write (WontApply f x (Typing m ty tm) (Typing m' ty' tm'))
                   pure (Typing M.empty restype (PVar (s2n "_")))
 infer env (Lit i) = do
-  pure (Typing M.empty (TVar (s2n "integer")) (PLit i))
+  pure (Typing M.empty (TIdent (PId (s2n "integer"))) (PLit i))

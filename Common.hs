@@ -16,9 +16,96 @@ import Wasm.Core
 import Sub
 
 -- Ideas from: https://github.com/magnatelee/implicitcalculus/
+--             A modular module system
 
+-- Path accessors
+type Ident = Name Path
+data Path
+  = PId Ident
+  | PDot Path String
+  deriving (Show, Generic, Typeable)
+
+instance Unifiable Path
+instance Alpha Path
+
+instance Subst YTm Path
+instance Subst Ty Path
+instance Subst Path Path where
+  isvar (PId n) = Just (SubstName n)
+  isvar _ = Nothing
+
+-- Modules and module signatures.
+data ModTerm = MIdent Path
+             | MModule Module
+             | MFunctor (Bind (Ident, Embed ModType) ModTerm)
+             | MApp ModTerm ModTerm
+             | MConstraint ModTerm ModType
+             deriving (Show, Generic, Typeable)
+
+instance Alpha ModTerm
+
+type Module = Bind [Ident] ModuleContents
+
+data ModuleContents = ModuleContents {
+  _specification :: Specification,
+  _modules :: [(Ident, ModTerm)],
+  _values :: [(Ident, Value)] }
+  deriving (Show, Generic, Typeable)
+
+instance Alpha ModuleContents
+
+specification f m = fmap (\a -> m {_specification = a}) (f (_specification m))
+modules f m = fmap (\a -> m {_modules = a}) (f (_modules m))
+values f m = fmap (\a -> m {_values = a}) (f (_values m))
+
+emptyModule = ModuleContents emptySpec [] []
+
+data ModType = ModFunctor (Bind (Ident, Embed ModType) ModType)
+             | Signature Signature
+             | MTIdent Path
+             deriving (Show, Generic, Typeable)
+
+instance Alpha ModType
+
+type Signature = Bind [Ident] Specification
+
+data Specification = Specification {
+  _moduleSigs :: [(Ident, ModType)],
+  _typeSigs :: [(Ident, Kind, Manifest)],
+  _valueSigs :: [(IsInstance, Ident, Ty)],
+  -- TODO: subtype signatures are global now.
+  _subTypeSigs :: [(String, Ignore (SubType Inp))] }
+  deriving (Show, Generic, Typeable)
+type IsInstance = Bool
+
+instance Alpha Specification
+
+moduleSigs f m = fmap (\a -> m {_moduleSigs = a}) (f (_moduleSigs m))
+typeSigs f m = fmap (\a -> m {_typeSigs = a}) (f (_typeSigs m))
+valueSigs f m = fmap (\a -> m {_valueSigs = a}) (f (_valueSigs m))
+subTypeSigs f m = fmap (\a -> m {_subTypeSigs = a}) (f (_subTypeSigs m))
+
+emptySpec = Specification [] [] [] []
+
+data Value = Value Tm
+           | ValueSubFunction (Ignore SubFunction)
+           deriving (Show, Generic, Typeable)
+
+instance Alpha Value
+
+data Manifest = Abstract
+              | Alias (Bind [(Name Ty, Embed MKind)] Ty)
+              | StructDecl (Bind [(Name Ty, Embed MKind)] [(Ident, Ty)])
+              -- | TypeStruct
+              -- _structDecls :: [(Name Ty, Bind [Name Ty] [(Name Tm, Ty)])],
+              deriving (Show, Generic, Typeable)
+
+instance Alpha Manifest
+
+-- Types
 data Ty
   = TVar (Name Ty)
+  | TIdent Path
   | TMeta (MVar MKind Ty)
   | TRField String Ty Ty
   | TREnd
@@ -158,6 +245,7 @@ instance Unifiable Kind where
 -- Source language level terms.
 data Tm
   = Var (Name Tm)
+  | Ident Path
   | Lam (Bind (Name Tm) Tm)
   | Let (Bind (Name Tm, Embed Tm) Tm)
   | App Tm Tm
